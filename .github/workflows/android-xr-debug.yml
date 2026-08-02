@@ -72,8 +72,17 @@ jobs:
         run: |
           git init -q .
           git remote add origin git@iaspis.github.com:Giannossk/IASPIS.git
-          git fetch --depth 1 origin "$IASPIS_REF"
-          git checkout -q --detach FETCH_HEAD
+          if git fetch --depth 1 origin "$IASPIS_REF" 2>/dev/null; then
+            git checkout -q --detach FETCH_HEAD
+          else
+            echo "shallow fetch of '$IASPIS_REF' failed; fetching every branch"
+            git fetch --quiet origin '+refs/heads/*:refs/remotes/origin/*'
+            if ! git rev-parse --verify --quiet "$IASPIS_REF^{commit}" >/dev/null; then
+              echo "::error::'$IASPIS_REF' does not name a commit or branch in IASPIS"
+              exit 1
+            fi
+            git checkout -q --detach "$IASPIS_REF"
+          fi
           git submodule update --init --recursive --depth 1
           git log -1 --format='building %H%n%s'
 
