@@ -1,0 +1,157 @@
+name: Linux Headless Build
+run-name: Linux Headless — ${{ inputs.ref || github.event.client_payload.ref || 'main' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "IASPIS commit-ish to build"
+        required: false
+        default: main
+        type: string
+  repository_dispatch:
+    types: [build, build-linux-headless]
+  schedule:
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-headless-${{ inputs.ref || github.event.client_payload.ref || 'main' }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: GCC Release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Configure read-only deploy key
+        env:
+          IASPIS_DEPLOY_KEY: ${{ secrets.IASPIS_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          printf '%s\n' "$IASPIS_DEPLOY_KEY" > ~/.ssh/iaspis
+          chmod 600 ~/.ssh/iaspis
+          cat >> ~/.ssh/config <<'EOF'
+          Host iaspis.github.com
+            HostName github.com
+            HostKeyAlias github.com
+            User git
+            IdentityFile ~/.ssh/iaspis
+            IdentitiesOnly yes
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Check out IASPIS
+        env:
+          IASPIS_REF: ${{ inputs.ref || github.event.client_payload.ref || 'main' }}
+        run: |
+          git init -q .
+          git remote add origin git@iaspis.github.com:Giannossk/IASPIS.git
+          git fetch --depth 1 origin "$IASPIS_REF"
+          git checkout -q --detach FETCH_HEAD
+          git log -1 --format='building %H%n%s'
+
+      - name: Check namespace layering
+        shell: bash
+        run: |
+          hits=$(grep -rn 'namespace iaspis\b' \
+                   IaspisEngine/IaspisPhysics IaspisEngine/IaspisRender IaspisEngine/IaspisCore IaspisEngine/IaspisOpenXR IaspisEngine/IaspisPlatform GameSDK IaspisEngine/IaspisAudio IaspisEngine/IaspisAction Testing Benchmarking \
+                   --include='*.h' --include='*.cpp' \
+                 | grep -v '^GameSDK/UltrasoundProbeSystem\.h:' \
+                 || true)
+          if [ -n "$hits" ]; then
+            echo "::error::lowercase 'namespace iaspis' is retired; use IASPIS::sim or IASPIS::core"
+            echo "$hits"
+            exit 1
+          fi
+          echo "namespace layering OK"
+
+          physlog=$(grep -rn '#include "LogManager.h"' \
+                      IaspisEngine/IaspisPhysics --include='*.h' --include='*.cpp' || true)
+          if [ -n "$physlog" ]; then
+            echo "::error::IaspisEngine/IaspisPhysics must log through Core's LogMacros.h"
+            echo "$physlog"
+            exit 1
+          fi
+          echo "physics logging seam OK"
+
+          toolleak=$(grep -rn 'IASPIS::render\|SceneNode' IaspisEngine/IaspisPhysics/Tools                        --include='*.h' --include='*.cpp' || true)
+          if [ -n "$toolleak" ]; then
+            echo "::error::IaspisEngine/IaspisPhysics/Tools must name no renderer type; use entity::RenderHandle"
+            echo "$toolleak"
+            exit 1
+          fi
+          echo "physics tools render-free OK"
+
+          allow='Vector2|Vector3|Vector4|Quaternion|Matrix3|Matrix4|Math|Degree|Radian|Real|Timer|MeshData|RenderVertex'
+          leaks=$(grep -rhoE 'render::[A-Za-z_][A-Za-z0-9_]*' \
+                    IaspisEngine/IaspisPhysics --include='*.h' --include='*.cpp' 2>/dev/null \
+                  | sed 's/^render:://' | grep -vE "^($allow)$" | sort | uniq -c | sort -rn || true)
+          if [ -n "$leaks" ]; then
+            echo "::warning::IaspisEngine/IaspisPhysics still names renderer scene-graph types (Stage 7 makes this fatal)"
+            echo "$leaks"
+          else
+            echo "physics/render boundary already clean"
+          fi
+
+      - name: Install native build dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes \
+            build-essential \
+            cmake \
+            git \
+            glslang-dev \
+            libasound2-dev \
+            libshaderc-dev \
+            libvulkan-dev \
+            mesa-vulkan-drivers \
+            libx11-dev \
+            libxaw7-dev \
+            libxt-dev \
+            ninja-build \
+            pkg-config \
+            spirv-tools
+
+      - name: Build headless libraries
+        shell: bash
+        env:
+          IASPIS_BUILD_JOBS: "4"
+        run: bash tools/build_linux_headless.sh Release
+
+      - name: Build and run doctest suite
+        shell: bash
+        run: |
+          cmake -S . -B build_linux_headless -DIASPIS_BUILD_DEBUG=ON
+          cmake --build build_linux_headless --parallel 4
+          ctest --test-dir build_linux_headless --output-on-failure
+
+      - name: Build r2t_bake tool
+        shell: bash
+        run: |
+          cmake -S . -B build_linux_headless -DIASPIS_BUILD_TOOLS=ON
+          cmake --build build_linux_headless --target r2t_bake --parallel 4
+
+      - name: Verify headless outputs
+        shell: bash
+        run: |
+          expected=(
+            build_linux_headless/IaspisEngine/libiaspis_engine.a
+            build_linux_headless/GameSDK/libgamesdk.a
+          )
+
+          for output in "${expected[@]}"; do
+            if [[ ! -f "${output}" ]]; then
+              echo "Missing expected output: ${output}" >&2
+              exit 1
+            fi
+          done
+
+          ls -lh "${expected[@]}"

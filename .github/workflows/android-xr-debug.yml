@@ -1,0 +1,142 @@
+name: Meta Quest Android XR Debug
+run-name: Quest XR Debug — ${{ inputs.ref || github.event.client_payload.ref || 'main' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "IASPIS commit-ish to build"
+        required: false
+        default: main
+        type: string
+  repository_dispatch:
+    types: [build, build-android-debug]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-xr-debug-${{ inputs.ref || github.event.client_payload.ref || 'main' }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Quest arm64-v8a Debug APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+
+    steps:
+      - name: Configure read-only deploy keys
+        env:
+          IASPIS_DEPLOY_KEY: ${{ secrets.IASPIS_DEPLOY_KEY }}
+          SHADERS_DEPLOY_KEY: ${{ secrets.SHADERS_DEPLOY_KEY }}
+          PROFILE_BSS_DEPLOY_KEY: ${{ secrets.PROFILE_BSS_DEPLOY_KEY }}
+          PROFILE_CHOLE_DEPLOY_KEY: ${{ secrets.PROFILE_CHOLE_DEPLOY_KEY }}
+          PROFILE_APPEND_DEPLOY_KEY: ${{ secrets.PROFILE_APPEND_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+
+          install_key() {
+            alias_host="$1"
+            key_file="$2"
+            key_value="$3"
+            repo_path="$4"
+            printf '%s\n' "$key_value" > "$HOME/.ssh/$key_file"
+            chmod 600 "$HOME/.ssh/$key_file"
+            {
+              echo "Host $alias_host"
+              echo "  HostName github.com"
+              echo "  HostKeyAlias github.com"
+              echo "  User git"
+              echo "  IdentityFile ~/.ssh/$key_file"
+              echo "  IdentitiesOnly yes"
+            } >> ~/.ssh/config
+            git config --global \
+              "url.git@$alias_host:$repo_path.git.insteadOf" \
+              "https://github.com/$repo_path.git"
+          }
+
+          install_key iaspis.github.com  iaspis  "$IASPIS_DEPLOY_KEY"         Giannossk/IASPIS
+          install_key shaders.github.com shaders "$SHADERS_DEPLOY_KEY"        Giannossk/IASPIS-Shaders
+          install_key bss.github.com     bss     "$PROFILE_BSS_DEPLOY_KEY"    Giannossk/IASPIS-Basic_Skills
+          install_key chole.github.com   chole   "$PROFILE_CHOLE_DEPLOY_KEY"  Giannossk/IASPIS-Chole
+          install_key append.github.com  append  "$PROFILE_APPEND_DEPLOY_KEY" Giannossk/IASPIS-Append
+
+          chmod 600 ~/.ssh/config
+
+      - name: Check out IASPIS
+        env:
+          IASPIS_REF: ${{ inputs.ref || github.event.client_payload.ref || 'main' }}
+        run: |
+          git init -q .
+          git remote add origin git@iaspis.github.com:Giannossk/IASPIS.git
+          git fetch --depth 1 origin "$IASPIS_REF"
+          git checkout -q --detach FETCH_HEAD
+          git submodule update --init --recursive --depth 1
+          git log -1 --format='building %H%n%s'
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            android/build.gradle
+            android/settings.gradle
+            android/gradle.properties
+            android/gradle/wrapper/gradle-wrapper.properties
+
+      - name: Set up Android SDK tools
+        uses: android-actions/setup-android@v4
+        with:
+          packages: platform-tools
+
+      - name: Cache native Android dependencies
+        uses: actions/cache@v5
+        with:
+          path: .android_deps
+          key: >-
+            android-native-${{ runner.os }}-${{
+              hashFiles('cmake/dependencies.cmake',
+              'android/build.gradle', 'tools/build_android_xr.sh') }}
+
+      - name: Install Android 16, NDK, and CMake
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes make perl
+          sdkmanager \
+            "platforms;android-36" \
+            "build-tools;35.0.0" \
+            "ndk;26.1.10909125" \
+            "cmake;3.31.5"
+
+      - name: Build Meta Quest XR APK
+        shell: bash
+        env:
+          IASPIS_ANDROID_BUILD_JOBS: "4"
+        run: bash tools/build_android_xr.sh Debug
+
+      - name: Verify APK
+        shell: bash
+        run: |
+          mapfile -t apks < <(find android/build/outputs/apk/debug \
+            -maxdepth 1 -type f -name '*.apk' -print)
+          if [[ ${#apks[@]} -eq 0 ]]; then
+            echo "No Meta Quest debug APK was produced" >&2
+            exit 1
+          fi
+          ls -lh "${apks[@]}"
+          sha256sum "${apks[@]}"
+          unzip -l "${apks[0]}" | grep -F 'lib/arm64-v8a/libIASPIS.so'
+
+      - name: Upload Meta Quest APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: meta-quest-xr-debug-${{ github.run_number }}
+          path: android/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14
