@@ -50,7 +50,7 @@ jobs:
           fi
           echo "head is $head"
 
-          for workflow in linux-headless.yml us-ci.yml; do
+          for workflow in linux-headless.yml us-ci.yml android-xr-debug.yml; do
             built=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" \
                       --limit 60 --json displayTitle --jq '.[].displayTitle' \
                     | grep -c "$head" || true)

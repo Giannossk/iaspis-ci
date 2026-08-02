@@ -16,7 +16,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: android-xr-debug-${{ inputs.ref || github.event.client_payload.ref || 'main' }}
+  group: android-xr-debug
   cancel-in-progress: true
 
 jobs:
