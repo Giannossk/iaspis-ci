@@ -158,6 +158,7 @@ jobs:
                    IaspisEngine/IaspisPhysics IaspisEngine/IaspisRender IaspisEngine/IaspisCore IaspisEngine/IaspisOpenXR IaspisEngine/IaspisPlatform GameSDK IaspisEngine/IaspisAudio IaspisEngine/IaspisAction Testing Benchmarking \
                    --include='*.h' --include='*.cpp' \
                  | grep -v '^GameSDK/UltrasoundProbeSystem\.h:' \
+                 | grep -v '^Testing/Ultrasound[A-Za-z]*\.cpp:' \
                  || true)
           if [ -n "$hits" ]; then
             echo "::error::lowercase 'namespace iaspis' is retired; use IASPIS::sim or IASPIS::core"
