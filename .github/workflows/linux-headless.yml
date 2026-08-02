@@ -11,8 +11,6 @@ on:
         type: string
   repository_dispatch:
     types: [build, build-linux-headless]
-  schedule:
-    - cron: "0 3 * * *"
 
 permissions:
   contents: read

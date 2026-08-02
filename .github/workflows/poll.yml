@@ -1,0 +1,63 @@
+name: Poll
+run-name: Poll
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: poll
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Configure read-only deploy key
+        env:
+          IASPIS_DEPLOY_KEY: ${{ secrets.IASPIS_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          printf '%s\n' "$IASPIS_DEPLOY_KEY" > ~/.ssh/iaspis
+          chmod 600 ~/.ssh/iaspis
+          cat >> ~/.ssh/config <<'EOF'
+          Host iaspis.github.com
+            HostName github.com
+            HostKeyAlias github.com
+            User git
+            IdentityFile ~/.ssh/iaspis
+            IdentitiesOnly yes
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Dispatch gates for an unbuilt head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          head=$(git ls-remote git@iaspis.github.com:Giannossk/IASPIS.git refs/heads/main | cut -f1)
+          if [ -z "$head" ]; then
+            echo "::error::could not read the upstream head"
+            exit 1
+          fi
+          echo "head is $head"
+
+          for workflow in linux-headless.yml us-ci.yml; do
+            built=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" \
+                      --limit 60 --json displayTitle --jq '.[].displayTitle' \
+                    | grep -c "$head" || true)
+            if [ "$built" -gt 0 ]; then
+              echo "$workflow already covers $head"
+            else
+              gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" -f "ref=$head"
+              echo "dispatched $workflow for $head"
+            fi
+          done
