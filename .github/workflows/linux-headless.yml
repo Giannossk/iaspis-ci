@@ -20,6 +20,102 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  ultrasound:
+    name: Standalone ultrasound tests (lavapipe)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Configure read-only deploy key
+        env:
+          IASPIS_DEPLOY_KEY: ${{ secrets.IASPIS_DEPLOY_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> ~/.ssh/known_hosts 2>/dev/null
+          printf '%s\n' "$IASPIS_DEPLOY_KEY" > ~/.ssh/iaspis
+          chmod 600 ~/.ssh/iaspis
+          cat >> ~/.ssh/config <<'EOF'
+          Host iaspis.github.com
+            HostName github.com
+            HostKeyAlias github.com
+            User git
+            IdentityFile ~/.ssh/iaspis
+            IdentitiesOnly yes
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Check out IASPIS
+        env:
+          IASPIS_REF: ${{ inputs.ref || github.event.client_payload.ref || 'main' }}
+        run: |
+          git init -q .
+          git remote add origin git@iaspis.github.com:Giannossk/IASPIS.git
+          git fetch --depth 1 origin "$IASPIS_REF"
+          git checkout -q --detach FETCH_HEAD
+          git log -1 --format='building %H%n%s'
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes \
+            build-essential \
+            glslang-dev \
+            libvulkan-dev \
+            mesa-vulkan-drivers \
+            spirv-tools \
+            curl
+
+      - name: Fetch doctest header
+        shell: bash
+        run: |
+          mkdir -p third_party/doctest
+          curl -fsSL https://raw.githubusercontent.com/doctest/doctest/v2.4.11/doctest/doctest.h \
+            -o third_party/doctest/doctest.h
+
+      - name: Build standalone ultrasound test
+        shell: bash
+        run: |
+          printf '%s\n' '#define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN' '#include <doctest/doctest.h>' > us_test_main.cpp
+          g++ -std=c++17 -O1 -g -Wall \
+            -I IaspisEngine/IaspisUltrasound \
+            -I third_party \
+            IaspisEngine/IaspisUltrasound/scan_sequence.cpp \
+            IaspisEngine/IaspisUltrasound/beam_profile.cpp \
+            IaspisEngine/IaspisUltrasound/gaussian_excitation.cpp \
+            IaspisEngine/IaspisUltrasound/UltrasoundProbe.cpp \
+            IaspisEngine/IaspisUltrasound/UsComputeContext.cpp \
+            IaspisEngine/IaspisUltrasound/UltrasoundSimulator.cpp \
+            Testing/UltrasoundMathTest.cpp \
+            Testing/UltrasoundComputeTest.cpp \
+            us_test_main.cpp \
+            -Wl,--start-group \
+            -l:libglslang.a \
+            -l:libMachineIndependent.a \
+            -l:libGenericCodeGen.a \
+            -l:libOSDependent.a \
+            -l:libSPIRV.a \
+            -l:libSPIRV-Tools-opt.a \
+            -l:libSPIRV-Tools-link.a \
+            -l:libSPIRV-Tools.a \
+            -l:libglslang-default-resource-limits.a \
+            -Wl,--end-group \
+            -lvulkan -lpthread -ldl \
+            -o us_test
+
+      - name: Run tests
+        shell: bash
+        run: ./us_test
+
+      - name: Upload first-light image
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: first-light-image
+          path: first_light.pgm
+          if-no-files-found: ignore
+
   build:
     name: GCC Release
     runs-on: ubuntu-24.04
